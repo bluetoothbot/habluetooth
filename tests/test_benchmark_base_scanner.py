@@ -1142,7 +1142,8 @@ def test_seed_name_cache_prefix_rule_paths(benchmark: BenchmarkFixture) -> None:
 async def test_describe_unavailable_scanners_with_20_scanners(
     benchmark: BenchmarkFixture,
 ) -> None:
-    """Benchmark the no-backend error diagnostic with 20 scanners.
+    """
+    Benchmark the no-backend error diagnostic with 20 scanners.
 
     All 20 scanners heard the address; this is the stuck-proxy path that
     fires on every failing connect attempt (issue #340), so its cost
