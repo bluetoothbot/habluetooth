@@ -1182,12 +1182,13 @@ async def test_describe_unavailable_scanners_with_20_scanners(
         )
 
     sorted_devices = manager.async_scanner_devices_by_address(address, True)
+    rejections = [(device, "connector cannot connect") for device in sorted_devices]
 
     wrapper = HaBleakClientWrapper(address)
 
     @benchmark
     def run():
-        wrapper._describe_unavailable_scanners(manager, sorted_devices)
+        wrapper._describe_unavailable_scanners(manager, rejections)
 
     for cancel in cancels:
         cancel()

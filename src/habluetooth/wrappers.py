@@ -547,13 +547,20 @@ class HaBleakClientWrapper(BleakClient):
 
     def _async_get_backend_for_ble_device(
         self, manager: BluetoothManager, scanner: BaseHaScanner, ble_device: BLEDevice
-    ) -> _HaWrappedBleakBackend | None:
-        """Get the backend for a BLEDevice."""
+    ) -> _HaWrappedBleakBackend | str:
+        """
+        Get the backend for a BLEDevice, or a rejection reason string.
+
+        Returning the reason here (rather than re-deriving it later from
+        the same scanner state) keeps the diagnostic in the no-backend
+        BleakError aligned with the actual cause and removes an otherwise
+        unreachable code path.
+        """
         if not (source := device_source(ble_device)):
             # If client is not defined in details
             # its the client for this platform
             if not manager.async_allocate_connection_slot(ble_device):
-                return None
+                return "local slot unavailable"
             backend = get_platform_client_backend_type()
             # bleak 2.0.0+ returns a tuple (backend_class, backend_id)
             if isinstance(backend, tuple):
@@ -567,8 +574,10 @@ class HaBleakClientWrapper(BleakClient):
 
         # Make sure the backend can connect to the device
         # as some backends have connection limits
-        if not scanner.connector or not scanner.connector.can_connect():
-            return None
+        if not scanner.connector:
+            return "no connector"
+        if not scanner.connector.can_connect():
+            return "connector cannot connect"
 
         return _HaWrappedBleakBackend(
             ble_device,
@@ -628,11 +637,14 @@ class HaBleakClientWrapper(BleakClient):
                 ),
             )
 
+        rejections: list[tuple[BluetoothScannerDevice, str]] = []
         for device in sorted_devices:
-            if backend := self._async_get_backend_for_ble_device(
+            result = self._async_get_backend_for_ble_device(
                 manager, device.scanner, device.ble_device
-            ):
-                return backend
+            )
+            if isinstance(result, _HaWrappedBleakBackend):
+                return result
+            rejections.append((device, result))
 
         # Check if all registered scanners are passive-only
         if scanners := manager.async_current_scanners():
@@ -650,7 +662,7 @@ class HaBleakClientWrapper(BleakClient):
                 )
                 raise BleakError(msg)
 
-        detail = self._describe_unavailable_scanners(manager, sorted_devices)
+        detail = self._describe_unavailable_scanners(manager, rejections)
         raise BleakError(
             "No backend with an available connection slot that can reach address"
             f" {address} was found. {detail}"
@@ -659,7 +671,7 @@ class HaBleakClientWrapper(BleakClient):
     def _describe_unavailable_scanners(
         self,
         manager: BluetoothManager,
-        sorted_devices: list[BluetoothScannerDevice],
+        rejections: list[tuple[BluetoothScannerDevice, str]],
     ) -> str:
         """
         Describe why no scanner could reach the address.
@@ -668,11 +680,11 @@ class HaBleakClientWrapper(BleakClient):
         hits when a connect fails: (a) no scanner has heard the device
         recently — usually range, antenna, or device-side issue; (b)
         scanners heard it but none were usable — stuck proxy, saturated
-        adapter, or missing connector. Per-scanner reason is included so
-        the diagnostic does not falsely assert slot exhaustion when the
-        real cause was a missing or busy connector.
+        adapter, or missing connector. The per-scanner reason is the one
+        the candidate-selection loop actually used to reject the scanner,
+        so the diagnostic cannot disagree with the cause.
         """
-        if not sorted_devices:
+        if not rejections:
             connectable_count = sum(
                 1 for s in manager.async_current_scanners() if s.connectable
             )
@@ -682,17 +694,8 @@ class HaBleakClientWrapper(BleakClient):
             )
 
         details: list[str] = []
-        for device in sorted_devices:
+        for device, reason in rejections:
             scanner = device.scanner
-            ble_device = device.ble_device
-            if not device_source(ble_device):
-                reason = "local slot unavailable"
-            elif not scanner.connector:
-                reason = "no connector"
-            elif not scanner.connector.can_connect():
-                reason = "connector cannot connect"
-            else:
-                reason = "unknown"
             allocations = scanner.get_allocations()
             slot_info = (
                 f"slots={allocations.free}/{allocations.slots} free"
@@ -704,7 +707,7 @@ class HaBleakClientWrapper(BleakClient):
                 f"in_progress={scanner._connections_in_progress()})"
             )
         return (
-            f"Tried {len(sorted_devices)} scanner(s) that heard this address, "
+            f"Tried {len(rejections)} scanner(s) that heard this address, "
             f"none were usable: {'; '.join(details)}"
         )
 
